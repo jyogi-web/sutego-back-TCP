@@ -32,7 +32,7 @@ jobs:
           source venv/bin/activate
       
       - name: Install dependencies
-        run: pip install -r arequirements.txt -v
+        run: pip install -r requirements.txt -v
         
       # Optional: Add step to run tests here (PyTest, Django test suites, etc.)
 
@@ -52,7 +52,7 @@ jobs:
       name: 'Production'
       url: ${{ steps.deploy-to-webapp.outputs.webapp-url }}
     permissions:
-      id-token: write
+      id-token: write # This is required for requesting the JWT
 
     steps:
       - name: Download artifact from build job
