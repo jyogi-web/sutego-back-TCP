@@ -1,93 +1,124 @@
-import FastAPI
 import socket
-import threading
-import cv2 # type: ignore
+import cv2
+import numpy as np
 import struct
+import time
 import mediapipe as mp
 import json
+from fastapi import FastAPI, BackgroundTasks
 
 app = FastAPI()
 
-@app.get("/hello")
-async def hello():
-    return {"message": "hello world!"}
+# IPアドレス取得
+hostname = socket.gethostname()
+local_ip = socket.gethostbyname(hostname)
+print("local_ipを取得：" + str(local_ip))
 
-def handle_tcp_image_client(conn, pose, mp_drawing, mp_drawing_styles, cap):
+# サーバーのホストとポートを設定
+HOST = local_ip
+PORT = 50007  # キャプチャ画像用
+PORT2 = 50008  # 座標データ用
+
+# MediaPipeのposeモジュールを初期化(debug)
+mp_pose = mp.solutions.pose
+pose = mp_pose.Pose(
+    static_image_mode=False,
+    model_complexity=1,
+    smooth_landmarks=True,
+    enable_segmentation=False,
+    smooth_segmentation=True,
+    min_detection_confidence=0.5,
+    min_tracking_confidence=0.5)
+
+# 描画用のユーティリティを初期化(debug)
+mp_drawing = mp.solutions.drawing_utils
+mp_drawing_styles = mp.solutions.drawing_styles
+
+# カメラのキャプチャ
+cap = cv2.VideoCapture(0)
+
+def capture_and_send_images():
+    # TCP/IPソケットを作成し、サーバーに接続
+    print("画像データ用TCP/IPソケットを作成しています")
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind((HOST, PORT))
+    s.listen(1)
+    conn, addr = s.accept()
+    print("画像データ用クライアント接続成功")
+    print('Connected by', addr)
+
+    print("座標データ用TCP/IPソケットを作成しています")
+    s2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s2.bind((HOST, PORT2))
+    s2.listen(1)
+    conn2, addr2 = s2.accept()
+    print("座標データ用クライアント接続成功")
+    print('connected by', addr2)
+
     try:
+        print("キャプチャした画像を転送中...")
         while cap.isOpened():
             success, frame = cap.read()
             if not success:
                 break
 
+            # BGR画像をRGBに変換(debug)
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            # 結果の描画をスキップするために画像を書き込み不可に設定(debug)
             frame.flags.writeable = False
+            # MediaPipe Poseの処理を実行(debug)
             results = pose.process(frame)
+            # 画像を書き込み可能に戻す(debug)
             frame.flags.writeable = True
+            # RGB画像をBGRに変換(debug)
             frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-
+            # ポーズランドマークの描画(debug)
             pose_landmarks = {}
             if results.pose_landmarks:
+                # JSONデータの作成
                 for id, landmark in enumerate(results.pose_landmarks.landmark):
                     pose_landmarks[f'{id}'] = [
                         round(landmark.x, 3),
                         round(landmark.y, 3),
                         round(landmark.z, 3)
                     ]
+
                 mp_drawing.draw_landmarks(
-                    frame, results.pose_landmarks, mp_pose.POSE_CONNECTIONS,
+                    frame,
+                    results.pose_landmarks,
+                    mp_pose.POSE_CONNECTIONS,
                     landmark_drawing_spec=mp_drawing_styles.get_default_pose_landmarks_style())
 
+            # 画像をバイト配列に変換
             _, buffer = cv2.imencode('.jpg', frame)
             byte_data = buffer.tobytes()
-            conn.sendall(struct.pack('>I', len(byte_data)))
+            # 画像データの長さを送信（4バイトの長さ情報）
+            conn.sendall(struct.pack('>I', len(byte_data)))  # ビッグエンディアンでエンコード
+            # 画像データを送信
             conn.sendall(byte_data)
 
+            # JSONデータを文字列に変換してエンコード
             json_data = json.dumps(pose_landmarks).encode('utf-8')
+            # JSONデータを転送
             conn2.sendall(json_data)
 
+            # ESCが押されたら終了
             if cv2.waitKey(1) & 0xFF == 27:
                 break
     except Exception as e:
-        print(f"Error during transmission: {e}")
+        print(f"送信中にエラーが発生しました: {e}")
     finally:
+        # ソケットを閉じる
         conn.close()
-        cap.release()
+        s.close()
+        conn2.close()
+        s2.close()
 
-def start_tcp_server(host, port, pose, mp_drawing, mp_drawing_styles):
-    cap = cv2.VideoCapture(0)
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.bind((host, port))
-    server.listen(1)
-    print(f"TCP Server Listening on port {port}...")
+@app.get("/")
+async def start_capture(background_tasks: BackgroundTasks):
+    background_tasks.add_task(capture_and_send_images)
+    return {"message": "Capture started"}
 
-    while True:
-        conn, addr = server.accept()
-        print(f"Accepted connection from {addr}")
-        client_handler = threading.Thread(target=handle_tcp_image_client, args=(conn, pose, mp_drawing, mp_drawing_styles, cap))
-        client_handler.start()
-
-@app.on_event("startup")
-def startup_event():
-    hostname = socket.gethostname()
-    local_ip = socket.gethostbyname(hostname)
-    print("Local IP:", local_ip)
-
-    mp_pose = mp.solutions.pose
-    pose = mp_pose.Pose(
-        static_image_mode=False,
-        model_complexity=1,
-        smooth_landmarks=True,
-        enable_segmentation=False,
-        smooth_segmentation=True,
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5)
-    mp_drawing = mp.solutions.drawing_utils
-    mp_drawing_styles = mp.solutions.drawing_styles
-
-    PORT_IMAGE = 50007
-
-    threading.Thread(target=start_tcp_server, args=(local_ip, PORT_IMAGE, pose, mp_drawing, mp_drawing_styles)).start()
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+@app.on_event("shutdown")
+async def shutdown_event():
+    cap.release()
