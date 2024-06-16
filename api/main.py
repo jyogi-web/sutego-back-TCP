@@ -108,7 +108,6 @@ def process_and_send_data():
 
                 # 画像データとJSONデータの送信
                 conn.sendall(struct.pack('>I', len(byte_data)) + byte_data)
-                conn.sendall(byte_data)
                 json_data = json.dumps(pose_landmarks).encode('utf-8')
                 conn2.sendall(json_data)
 
